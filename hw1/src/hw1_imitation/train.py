@@ -144,14 +144,14 @@ def run_training(config: TrainConfig) -> None:
     )
 
     def train_step(state: torch.Tensor, action_chunk: torch.Tensor) -> torch.Tensor:
-        optimizer.zero_grad(set_to_none=True)
-        loss = model.compute_loss(state, action_chunk)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True) # 1. 清空上一轮算出来的梯度旧账，设为 None 能比 0 稍微更省一点显存。
+        loss = model.compute_loss(state, action_chunk) # 2. 前向传播：计算模型输出跟真实操作的差距。
+        loss.backward() # 3. 反向传播：链式求导，求出整个网络每个神经元的梯度（应该怎么调整方向）。
+        optimizer.step() # 4. 参数更新：根据上面求出来的方向和配置的学习率，走一小步。
         return loss
 
     if hasattr(torch, "compile"):
-        try:
+        try: # 如果是较新的 PyTorch（>= 2.0），会利用 torch.compile 对这个核心步骤用底层 C++/Triton 进行 JIT（即时）编译，能大幅提速运算。
             train_step = torch.compile(train_step)
         except Exception:
             pass
@@ -160,15 +160,16 @@ def run_training(config: TrainConfig) -> None:
     model.train()
     header_logged = False
 
-    for epoch in range(config.num_epochs):
-        for state, action_chunk in loader:
+    for epoch in range(config.num_epochs): # 外循环：全量数据集要反复看 num_epochs 遍（如400遍）。
+        for state, action_chunk in loader: # 内循环：DataLoader不断吐出 128 条大小的数据批次。
+            # 含义：前面模型去了 GPU，原木材（数据）也必须显式被搬到同个 GPU 上，否则会引起计算错位报错。
             state = state.to(device)
             action_chunk = action_chunk.to(device)
 
-            loss = train_step(state, action_chunk)
-            global_step += 1
+            loss = train_step(state, action_chunk) # 执行核心的一小步训练
+            global_step += 1 # 统计绝对经过了多少批次
 
-            if global_step % config.log_interval == 0:
+            if global_step % config.log_interval == 0: # 语法：% 取余。含义：每过 log_interval（如 100 步），去记一次 Loss。
                 log_data = {
                     "train/loss": float(loss.item()),
                     "train/epoch": epoch,
@@ -178,7 +179,7 @@ def run_training(config: TrainConfig) -> None:
                     header_logged = True
                 logger.log(log_data, step=global_step)
 
-            if global_step % config.eval_interval == 0:
+            if global_step % config.eval_interval == 0: # 语法：% 取余。含义：每过 eval_interval（如 1000 步），去评估一次策略。
                 evaluate_policy(
                     model=model,
                     normalizer=normalizer,
@@ -189,10 +190,10 @@ def run_training(config: TrainConfig) -> None:
                     flow_num_steps=config.flow_num_steps,
                     step=global_step,
                     logger=logger,
-                )
-                model.train()
+                ) # 调用刚才那个环境跑 100 局物理仿真
+                model.train() # 语法/关键点：跑完仿真模型会被设为 eval()，这里必须重置回 train()，以便下一次循环正常学习！
 
-    if global_step % config.eval_interval != 0:
+    if global_step % config.eval_interval != 0: # 如果最后跳出循环时正好不是整万数，强制进行一次最终评估
         evaluate_policy(
             model=model,
             normalizer=normalizer,
@@ -205,7 +206,7 @@ def run_training(config: TrainConfig) -> None:
             logger=logger,
         )
 
-    logger.dump_for_grading()
+    logger.dump_for_grading() # 触发 Wandb 和本地日志的同步落盘保存。
 
 
 def main() -> None:
